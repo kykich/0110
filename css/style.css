@@ -1628,3 +1628,51 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
     gap: 6px;
     padding: 8px 2px 4px;
 }
+
+/* ===== Источники (RAG) в карточке ответа =====
+   Список документов, на которые опирался ответ: ссылки на PDF-файлы
+   открываются в новой вкладке (обработчик /docs/<file>). */
+.msg.a .variant-sources {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed #d8deee;
+}
+.msg.a .sources-title {
+    font-size: .72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    color: #6a7392;
+    margin-bottom: 4px;
+}
+.msg.a .sources-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.msg.a .source-item {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: .78rem;
+    line-height: 1.35;
+}
+.msg.a .source-link {
+    color: #2c4ecf;
+    text-decoration: none;
+    font-weight: 600;
+    word-break: break-word;
+}
+.msg.a .source-link:hover { text-decoration: underline; }
+.msg.a .source-link::before {
+    content: "📄 ";
+    font-weight: 400;
+}
+.msg.a .source-pages {
+    color: #7d879c;
+    font-size: .72rem;
+    white-space: nowrap;
+}

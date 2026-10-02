@@ -13,6 +13,7 @@
 """
 import json
 import time
+import urllib.parse
 from datetime import datetime, timedelta
 
 from . import config, deepseek, gigachat, html_report
@@ -167,7 +168,8 @@ class Agent:
 
     def answer(self, question, history=None, selected=None, max_tokens=None,
                compact=None, memory=None, profile=None, answer_title=None,
-               task_state=None, invariants=None, rag_context=None):
+               task_state=None, invariants=None, rag_context=None,
+               rag_sources=None):
         """Обрабатывает запрос пользователя и возвращает результат.
 
         Принимает:
@@ -209,6 +211,11 @@ class Agent:
                       перед диалогом (режим A2: контекст подставлен заранее,
                       модель его «не ищет»). Поиск выполняет вызывающая
                       сторона (server/session), агент только использует текст.
+            rag_sources — список источников RAG (см. rag.format_sources):
+                      [{"file", "doc", "pages"}, …] или None. Используется
+                      для блока «Источники» в карточке ответа: пользователь
+                      видит, на какие документы опирался ответ, и может
+                      открыть соответствующий PDF.
         Возвращает dict, единообразный для успеха и ошибок:
             ok      — True, если хотя бы одна модель ответила;
             text    — текстовое представление ответов;
@@ -273,6 +280,10 @@ class Agent:
         # системный промпт, отражаем его наличие в «ходе запросов».
         rag_text = str(rag_context or "").strip()
         rag_note = (" | RAG-контекст: %d симв." % len(rag_text)) if rag_text else ""
+        # Источники RAG (для блока «Источники» в карточке ответа).
+        src_list = [s for s in (rag_sources or []) if isinstance(s, dict)
+                    and str(s.get("file") or "").strip()]
+        src_note = (" | источников: %d" % len(src_list)) if src_list else ""
         if rag_text:
             trace.append({"kind": "act",
                           "title": "Агент: добавлен RAG-контекст документов",
@@ -365,7 +376,7 @@ class Agent:
                     continue
             block_html, mem_counts = self._render_block(
                 provider, model, label, cls, single, memory,
-                title=answer_title)
+                title=answer_title, rag_sources=src_list)
             blocks.append(block_html)
             memory_used["working"] += mem_counts["working"]
             memory_used["longterm"] += mem_counts["longterm"]
@@ -1193,7 +1204,7 @@ class Agent:
             }
 
     def _render_block(self, provider, model, label, cls, single, memory=None,
-                      title=None):
+                      title=None, rag_sources=None):
         """HTML-блок (карточка ответа одной модели) и счётчики памяти.
 
         В заголовке карточки показываем title (имя персоны, если ответ даёт
@@ -1204,6 +1215,10 @@ class Agent:
         подсвечиваются: рабочая — фисташковым, долговременная — фуксией.
         Возвращает кортеж (html, counts), где counts = {"working": N,
         "longterm": M} — сколько фрагментов заимствовано из каждой памяти.
+
+        rag_sources — список источников RAG (см. rag.format_sources) или
+        None. Если задан — в конце карточки выводится блок «Источники» со
+        списком документов и страниц, которые использовал агент.
         """
         content = single["content"]
         counts = {"working": 0, "longterm": 0}
@@ -1213,15 +1228,60 @@ class Agent:
         except Exception:
             frag = html_report.escape_html(content)
 
+        sources_html = self._render_sources_html(rag_sources)
         block = (
             "<div class='variant variant-%s'>"
             "<div class='variant-head'>"
             "<span class='variant-name'>%s</span>"
             "</div>"
-            "<div class='variant-body'>%s</div></div>"
-            % (cls, title or label, frag)
+            "<div class='variant-body'>%s%s</div></div>"
+            % (cls, title or label, frag, sources_html)
         )
         return block, counts
+
+    @staticmethod
+    def _render_sources_html(rag_sources):
+        """HTML-блок «Источники» (из RAG) для карточки ответа (или "").
+
+        rag_sources — список {file, doc, pages} (см. rag.format_sources).
+        Каждый источник — кликабельная ссылка на PDF-файл (открывается в
+        новой вкладке) со списком страниц. Барабан безопасен: имена файлов
+        и номера страниц экранируются. Пустой список → "" (блок не выводим).
+        """
+        items = [s for s in (rag_sources or []) if isinstance(s, dict)
+                 and str(s.get("file") or "").strip()]
+        if not items:
+            return ""
+        rows = []
+        for s in items:
+            file_name = str(s.get("file")).strip()
+            doc = str(s.get("doc") or file_name).strip()
+            pages = s.get("pages") or []
+            try:
+                pages = sorted({int(p) for p in pages if int(p) > 0})
+            except (TypeError, ValueError, OverflowError):
+                pages = []
+            # Ссылка на документ: /docs/<file> (обработчик отдаёт PDF из
+            # папки RAG). Имя файла кодируем в URL.
+            href = "/docs/%s" % urllib.parse.quote(file_name)
+            page_note = (", стр. %s" % ", ".join(str(p) for p in pages)) \
+                if pages else ""
+            rows.append(
+                "<li class='source-item'>"
+                "<a class='source-link' href='%s' target='_blank' "
+                "rel='noopener'>%s</a>"
+                "<span class='source-pages'>%s</span>"
+                "</li>"
+                % (html_report.escape_html(href),
+                   html_report.escape_html(doc),
+                   html_report.escape_html(page_note))
+            )
+        return (
+            "<div class='variant-sources'>"
+            "<div class='sources-title'>Источники (RAG)</div>"
+            "<ul class='sources-list'>%s</ul>"
+            "</div>" % "".join(rows)
+        )
 
     def _render_text(self, provider, model, label, single, title=None):
         """Текстовая строка-представление ответа одной модели.

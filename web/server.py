@@ -18,6 +18,8 @@
 JSON-API:
     GET  /                  - страница (index.html)
     GET  /css/*,/js/*       - стили и скрипты
+    GET  /docs/<file>       - PDF-документ из папки RAG (для ссылок
+                              «Источники» в карточке ответа)
     GET  /api/model         - список моделей, которые обслуживает агент
     GET  /api/session       - сохранённая история + стратегия + facts + ветки
     POST /api/ask           - {question, models[], max_tokens?, compact?,
@@ -576,6 +578,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return self._serve_static_safe("index.html")
         if path.startswith(("/css/", "/js/")):
             return self._serve_static_safe(path.lstrip("/"))
+        if path.startswith("/docs/"):
+            # Отдача PDF-документа из папки RAG по имени файла — для ссылок
+            # «Источники» в карточке ответа (см. agent._render_sources_html).
+            return self._serve_rag_doc(path[len("/docs/"):])
         if path == "/api/model":
             return self._send_json(200, {
                 "ok": True,
@@ -653,6 +659,38 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype or "application/octet-stream")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_rag_doc(self, rel):
+        """Отдаёт PDF из папки RAG-документов по имени файла.
+
+        Используется ссылками «Источники» в карточке ответа: имя файла
+        совпадает с basename документа в индексе. Защита от выхода за
+        пределы папки документов (path traversal): путь приводится к
+        реальному и проверяется, что он лежит внутри docs_dir.
+        """
+        import urllib.parse
+        rel = urllib.parse.unquote(rel or "").strip().lstrip("/")
+        docs_dir = (self.session.rag_settings().get("docs_dir")
+                    or config.RAG_DOCS_DIR)
+        root_real = os.path.realpath(docs_dir)
+        # Имя файла может содержать подпапки, но не может выйти за корень.
+        full = os.path.realpath(os.path.join(root_real, os.path.normpath(rel)))
+        if not (full.startswith(root_real + os.sep) or full == root_real):
+            return self._send_bytes(403, "Forbidden", "text/plain")
+        if not os.path.isfile(full):
+            return self._send_bytes(404, "Not Found", "text/plain")
+        ctype, _ = mimetypes.guess_type(full)
+        with open(full, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header(
+            "Content-Disposition",
+            "inline; filename*=UTF-8''%s" % urllib.parse.quote(
+                os.path.basename(full)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -821,9 +859,21 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         # (режим A2 — поиск всегда, модель получает готовый контекст).
         # Ошибки поиска (Ollama недоступна и т.п.) не ломают ответ модели.
         rag_context, rag_hits = self.session.rag_context(question)
+        rag_sources = []
         if rag_context:
             print("[RAG] в запрос добавлено %d фрагментов (%d символов)"
                   % (len(rag_hits), len(rag_context)), flush=True)
+            # Уникальные источники (документ + страницы) для карточки ответа.
+            try:
+                from rtk_app import rag as rag_mod
+                rag_sources = rag_mod.format_sources(rag_hits)
+                if rag_sources:
+                    print("[RAG] источников для карточки ответа: %d"
+                          % len(rag_sources), flush=True)
+            except Exception as exc:                 # noqa: BLE001
+                print("[RAG] не удалось собрать источники: %s" % exc,
+                      flush=True)
+                rag_sources = []
         else:
             print("[RAG] контекст не добавлен (выключен или индекс пуст)",
                   flush=True)
@@ -905,7 +955,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                                        answer_title=answer_title,
                                        task_state=task_state,
                                        invariants=invariants,
-                                       rag_context=(rag_context or None))
+                                       rag_context=(rag_context or None),
+                                       rag_sources=(rag_sources or None))
         if result.get("ok"):
             # По одному ходу на ответ модели с уже готовой разметкой
             self.session.append_turn(question, {
