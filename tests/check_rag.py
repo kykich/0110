@@ -181,6 +181,36 @@ def test_agent_prompt():
           "ИНСТРУКЦИЯ ПО RAG" in a.rag_system_prompt("контекст"))
 
 
+def test_sources_block():
+    section("6b. Источники RAG в карточке ответа")
+    # format_sources: уникальные файлы + объединённые страницы.
+    hits = [
+        {"file": "/docs/a.pdf", "page": 2, "score": 0.9},
+        {"file": "/docs/a.pdf", "page": 5, "score": 0.7},
+        {"file": "/docs/b.pdf", "page": 1, "score": 0.8},
+    ]
+    srcs = rag.format_sources(hits)
+    check("format_sources: два уникальных файла", len(srcs) == 2)
+    check("format_sources: файл a первым (лучший score)",
+          srcs[0]["file"] == "a.pdf")
+    check("format_sources: страницы a объединены", srcs[0]["pages"] == [2, 5])
+
+    # Блок «Источники» в HTML карточки ответа.
+    html = Agent._render_sources_html(srcs)
+    check("блок источников содержит заголовок", "Источники (RAG)" in html)
+    check("блок источников содержит ссылку на a.pdf", "a.pdf" in html)
+    check("ссылка ведёт на /docs/", "/docs/" in html)
+    check("указаны страницы", "стр. 2, 5" in html)
+    check("пустой список источников — пустой блок",
+          Agent._render_sources_html([]) == "")
+    check("None источников — пустой блок",
+          Agent._render_sources_html(None) == "")
+    # Экранирование в имени файла.
+    esc = Agent._render_sources_html(
+        [{"file": "x<script>.pdf", "doc": "x", "pages": []}])
+    check("имя файла экранируется в href", "<script>" not in esc)
+
+
 def test_embed_degradation():
     section("7. Деградация при недоступной Ollama")
     # Указываем заведомо недоступный адрес — запрос должен упасть, но
@@ -204,6 +234,7 @@ def main():
     test_store_status_and_settings()
     test_session_store_rag()
     test_agent_prompt()
+    test_sources_block()
     test_embed_degradation()
     return finish("Проверка RAG")
 
