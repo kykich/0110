@@ -41,6 +41,7 @@ __all__ = [
     "RagStore",
     "embed_text",
     "embed_available",
+    "format_sources",
 ]
 
 # Блокировка на время (пере)индексации: две параллельные индексации одного
@@ -71,13 +72,24 @@ def _load_pdf_reader():
 # ----------------------------------------------------------------------
 # Эмбеддинги (Ollama)
 # ----------------------------------------------------------------------
+def _clean_text(text):
+    """Очищает текст от некорректных Unicode-символов.
+
+    PDF могут содержать бинарные данные, интерпретированные как текст —
+    surrogate pairs, непереводимые символы и т.п. Ollama не может их
+    обработать и возвращает HTTP 500. Заменяем на U+FFFD.
+    """
+    text = str(text or "")
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def embed_text(text, model=None, timeout=None):
     """Считает вектор эмбеддинга для текста через локальную Ollama.
 
     Возвращает список float (длина RAG_EMBED_DIM) либо бросает исключение
     при недоступности Ollama/модели. Запрос — /api/embeddings (один prompt).
     """
-    text = str(text or "").strip()
+    text = _clean_text(text or "").strip()
     if not text:
         raise ValueError("пустой текст для эмбеддинга")
     payload = {
@@ -90,13 +102,22 @@ def embed_text(text, model=None, timeout=None):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(
-            req, timeout=timeout or config.RAG_EMBED_TIMEOUT) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    vec = data.get("embedding")
-    if not isinstance(vec, list) or not vec:
-        raise RuntimeError("Ollama не вернула эмбеддинг")
-    return [float(x) for x in vec]
+    timeout_val = timeout or config.RAG_EMBED_TIMEOUT
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout_val) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            vec = data.get("embedding")
+            if not isinstance(vec, list) or not vec:
+                raise RuntimeError("Ollama не вернула эмбеддинг")
+            return [float(x) for x in vec]
+        except urllib.error.HTTPError as exc:
+            if exc.code == 500 and attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            raise
 
 
 def embed_available(timeout=5):
@@ -177,7 +198,8 @@ def extract_pdf_text(path, max_mb=None):
         pages = []
         for page in reader.pages:
             try:
-                pages.append(page.extract_text() or "")
+                raw = page.extract_text() or ""
+                pages.append(_clean_text(raw))
             except Exception:                    # noqa: BLE001
                 pages.append("")
     except Exception as exc:                     # noqa: BLE001
@@ -413,9 +435,11 @@ class RagStore(object):
                     continue
                 vectors = []
                 embed_failed = None
-                for ch in chunks:
+                for ci, ch in enumerate(chunks):
                     try:
                         vectors.append(embed_text(ch["text"]))
+                        if ci > 0 and ci % 10 == 0:
+                            time.sleep(1)
                     except Exception as exc:     # noqa: BLE001
                         embed_failed = str(exc)
                         break
@@ -570,3 +594,59 @@ class RagStore(object):
             "errors": [{"file": os.path.basename(p), "error": e}
                        for p, e in errs],
         }
+
+
+# ----------------------------------------------------------------------
+# Источники (для карточки ответа)
+# ----------------------------------------------------------------------
+def format_sources(hits):
+    """Собирает УНИКАЛЬНЫЕ источники из результатов поиска RAG.
+
+    На вход — список фрагментов (hits) из RagStore.search/build_context,
+    каждый вида {"file", "page", "chunk", "score", ...}. Возвращает список
+    словарей {file, doc, pages}, где:
+      * file  — имя PDF-файла (без пути) — по нему открывается документ;
+      * doc   — имя файла без расширения (для показа);
+      * pages — отсортированный список страниц, где встречается фрагмент.
+
+    Один и тот же файл показывается один раз, а страницы объединяются.
+    Порядок — по максимальной релевантности (лучший score сверху).
+    """
+    order = []          # порядок вывода файлов (по лучшему score)
+    by_file = {}        # file -> {"doc":..., "pages": set(), "best": score}
+    for h in hits or []:
+        if not isinstance(h, dict):
+            continue
+        full = str(h.get("file") or "").strip()
+        if not full:
+            continue
+        base = os.path.basename(full)
+        try:
+            page = int(h.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        try:
+            score = float(h.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        item = by_file.get(base)
+        if item is None:
+            item = {"doc": os.path.splitext(base)[0],
+                    "pages": set(), "best": score}
+            by_file[base] = item
+            order.append(base)
+        if page > 0:
+            item["pages"].add(page)
+        if score > item["best"]:
+            item["best"] = score
+    # Сортируем файлы по убыванию релевантности (лучший фрагмент сверху).
+    order.sort(key=lambda b: by_file[b]["best"], reverse=True)
+    out = []
+    for base in order:
+        item = by_file[base]
+        out.append({
+            "file": base,
+            "doc": item["doc"],
+            "pages": sorted(item["pages"]),
+        })
+    return out
