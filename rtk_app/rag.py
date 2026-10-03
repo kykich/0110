@@ -42,6 +42,7 @@ __all__ = [
     "embed_text",
     "embed_available",
     "format_sources",
+    "format_citation_id",
     "tokenize_ru",
     "lexical_score",
     "hybrid_score",
@@ -796,8 +797,10 @@ class RagStore(object):
         used = 0
         cap = int(config.RAG_CTX_CAP)
         for h in hits:
-            base = os.path.basename(h["file"])
-            head = "[фрагмент: %s, стр. %s]" % (base, h["page"])
+            cid = format_citation_id(h["file"], h.get("page"),
+                                     h.get("chunk"))
+            head = "[фрагмент: %s, id=%s]" % (
+                os.path.basename(h["file"]), cid)
             body = h["text"].strip()
             piece = head + "\n" + body
             if used + len(piece) > cap and parts:
@@ -852,8 +855,37 @@ class RagStore(object):
 
 
 # ----------------------------------------------------------------------
-# Источники (для карточки ответа)
+# Источники и идентификаторы ссылок (для карточки ответа)
 # ----------------------------------------------------------------------
+def format_citation_id(file, page, chunk):
+    """Собирает КОРОТКИЙ идентификатор фрагмента вида section/chunk_id.
+
+    Формат: «<документ>#стр.<P>/chunk.<C>» — используется и в промпте (модель
+    обязана ссылаться на источник в скобках), и в блоке «Источники». Так
+    пользователь понимает, из какого раздела/фрагмента взята цитата.
+    Без номера страницы/чанка часть опускается. Пустой файл → "".
+    """
+    base = os.path.basename(str(file or "").strip())
+    if not base:
+        return ""
+    parts = []
+    try:
+        p = int(page or 0)
+    except (TypeError, ValueError):
+        p = 0
+    try:
+        c = int(chunk or 0)
+    except (TypeError, ValueError):
+        c = 0
+    if p > 0:
+        parts.append("стр.%d" % p)
+    if c > 0:
+        parts.append("chunk.%d" % c)
+    if not parts:
+        return base
+    return base + "#" + "/".join(parts)
+
+
 def format_sources(hits):
     """Собирает УНИКАЛЬНЫЕ источники из результатов поиска RAG.
 
@@ -868,7 +900,7 @@ def format_sources(hits):
     Порядок — по максимальной релевантности (лучший score сверху).
     """
     order = []          # порядок вывода файлов (по лучшему score)
-    by_file = {}        # file -> {"doc":..., "pages": set(), "best": score}
+    by_file = {}        # file -> {"doc", "pages", "best", "citations"}
     for h in hits or []:
         if not isinstance(h, dict):
             continue
@@ -881,17 +913,25 @@ def format_sources(hits):
         except (TypeError, ValueError):
             page = 0
         try:
+            chunk = int(h.get("chunk") or 0)
+        except (TypeError, ValueError):
+            chunk = 0
+        try:
             score = float(h.get("score") or 0.0)
         except (TypeError, ValueError):
             score = 0.0
         item = by_file.get(base)
         if item is None:
             item = {"doc": os.path.splitext(base)[0],
-                    "pages": set(), "best": score}
+                    "pages": set(), "best": score, "citations": []}
             by_file[base] = item
             order.append(base)
         if page > 0:
             item["pages"].add(page)
+        # Идентификатор section/chunk_id этого фрагмента (для ссылок).
+        cid = format_citation_id(base, page, chunk)
+        if cid and cid not in item["citations"]:
+            item["citations"].append(cid)
         if score > item["best"]:
             item["best"] = score
     # Сортируем файлы по убыванию релевантности (лучший фрагмент сверху).
@@ -903,5 +943,6 @@ def format_sources(hits):
             "file": base,
             "doc": item["doc"],
             "pages": sorted(item["pages"]),
+            "citations": sorted(item["citations"]),
         })
     return out
