@@ -42,6 +42,9 @@ __all__ = [
     "embed_text",
     "embed_available",
     "format_sources",
+    "tokenize_ru",
+    "lexical_score",
+    "hybrid_score",
 ]
 
 # Блокировка на время (пере)индексации: две параллельные индексации одного
@@ -169,6 +172,118 @@ def _cosine(a, b):
     if na <= 0.0 or nb <= 0.0:
         return 0.0
     return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+# ----------------------------------------------------------------------
+# Лексический сигнал (гибридный поиск): ключевые слова запроса
+# ----------------------------------------------------------------------
+# Стоп-слова русского языка + общие служебные слова: не несут смысла для
+# поиска и только «размывают» лексический скор.
+_STOPWORDS = frozenset((
+    "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а",
+    "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же",
+    "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от",
+    "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже",
+    "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был",
+    "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там",
+    "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть",
+    "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб",
+    "без", "будто", "чего", "раз", "тоже", "себе", "под", "будет", "ж",
+    "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем",
+    "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее",
+    "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при",
+    "наконец", "два", "об", "другой", "хоть", "после", "над", "больше",
+    "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много",
+    "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой",
+    "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им",
+    "более", "всегда", "конечно", "всю", "между", "это", "будь",
+))
+
+# Минимальная длина токена (символы). Короче — отбрасываем (предлоги и т.п.).
+_TOKEN_MIN = 3
+
+
+def tokenize_ru(text):
+    """Разбивает текст на значимые токены (лемма-подобно, без морфологии).
+
+    Приводит к нижнему регистру, выкидывает всё кроме букв/цифр, делит по
+    не-буквенным символам, отбрасывает стоп-слова и короткие токены.
+    Русское слово «обрезается» до первых 5 символов — грубая, но рабочая
+    нормализация словоформ (засечка/засечки/засечек -> «засеч»).
+    """
+    text = str(text or "").lower().replace("ё", "е")
+    out = []
+    buf = []
+    for ch in text:
+        if ch.isalpha() or ch.isdigit():
+            buf.append(ch)
+        else:
+            if buf:
+                out.append("".join(buf))
+                buf = []
+    if buf:
+        out.append("".join(buf))
+    res = []
+    for tok in out:
+        if len(tok) < _TOKEN_MIN:
+            continue
+        if tok in _STOPWORDS:
+            continue
+        res.append(tok[:5])
+    return res
+
+
+def lexical_score(query_terms, text):
+    """Лексическое совпадение терминов запроса с текстом (0..1).
+
+    Считает долю УНИКАЛЬНЫХ терминов запроса, найденных в токенах текста
+    (нормализованных так же, как запрос). 1.0 — все термины есть в тексте.
+    Пустой запрос или текст -> 0.0.
+    """
+    if not query_terms:
+        return 0.0
+    doc_terms = set(tokenize_ru(text))
+    if not doc_terms:
+        return 0.0
+    uniq = set(query_terms)
+    if not uniq:
+        return 0.0
+    hit = sum(1 for t in uniq if t in doc_terms)
+    return hit / float(len(uniq))
+
+
+def hybrid_score(cosine, lexical, alpha=0.6):
+    """Объединяет семантический и лексический скоры в один (0..1).
+
+    alpha — вес косинусной части (0..1); вес лексики = 1 - alpha.
+    Оба входа ожидаются в диапазоне 0..1 (косинус может быть отрицательным
+    для противоположных векторов — «сжимаем» в 0).
+    """
+    try:
+        c = float(cosine)
+    except (TypeError, ValueError):
+        c = 0.0
+    try:
+        lx = float(lexical)
+    except (TypeError, ValueError):
+        lx = 0.0
+    if c < 0.0:
+        c = 0.0
+    if c > 1.0:
+        c = 1.0
+    if lx < 0.0:
+        lx = 0.0
+    if lx > 1.0:
+        lx = 1.0
+    try:
+        a = float(alpha)
+    except (TypeError, ValueError):
+        a = 0.6
+    if a < 0.0:
+        a = 0.0
+    if a > 1.0:
+        a = 1.0
+    return a * c + (1.0 - a) * lx
 
 
 # ----------------------------------------------------------------------
@@ -317,6 +432,13 @@ class RagStore(object):
             "top_k": int(config.RAG_TOP_K),
             "embed_model": config.RAG_EMBED_MODEL,
             "chunk_chars": int(config.RAG_CHUNK_CHARS),
+            # Улучшенный поиск (2-й этап): фильтрация/реранкинг + rewrite.
+            "rewrite": bool(config.RAG_REWRITE),
+            "hybrid": bool(config.RAG_HYBRID),
+            "hybrid_alpha": float(config.RAG_HYBRID_ALPHA),
+            "pool_mult": int(config.RAG_POOL_MULT),
+            "min_score": float(config.RAG_MIN_SCORE),
+            "rerank": str(config.RAG_RERANK),
             "updated": None,
         }
         data = {}
@@ -337,6 +459,28 @@ class RagStore(object):
             out["top_k"] = max(1, min(20, k))
         except (TypeError, ValueError):
             pass
+        # Улучшенный поиск: булевы/числовые настройки 2-го этапа.
+        if "rewrite" in data:
+            out["rewrite"] = bool(data.get("rewrite"))
+        if "hybrid" in data:
+            out["hybrid"] = bool(data.get("hybrid"))
+        try:
+            a = float(data.get("hybrid_alpha"))
+            out["hybrid_alpha"] = max(0.0, min(1.0, a))
+        except (TypeError, ValueError):
+            pass
+        try:
+            pm = int(data.get("pool_mult"))
+            out["pool_mult"] = max(1, min(50, pm))
+        except (TypeError, ValueError):
+            pass
+        try:
+            ms = float(data.get("min_score"))
+            out["min_score"] = max(0.0, min(1.0, ms))
+        except (TypeError, ValueError):
+            pass
+        if isinstance(data.get("rerank"), str) and data["rerank"] in ("none", "llm"):
+            out["rerank"] = data["rerank"]
         if data.get("updated"):
             out["updated"] = data["updated"]
         return out
@@ -349,7 +493,9 @@ class RagStore(object):
         except OSError:
             pass
 
-    def update_settings(self, enabled=None, docs_dir=None, top_k=None):
+    def update_settings(self, enabled=None, docs_dir=None, top_k=None,
+                        rewrite=None, hybrid=None, hybrid_alpha=None,
+                        pool_mult=None, min_score=None, rerank=None):
         """Точечно меняет настройки (None — не трогать). Возвращает снимок."""
         s = self.load_settings()
         if enabled is not None:
@@ -361,6 +507,27 @@ class RagStore(object):
                 s["top_k"] = max(1, min(20, int(top_k)))
             except (TypeError, ValueError):
                 pass
+        if rewrite is not None:
+            s["rewrite"] = bool(rewrite)
+        if hybrid is not None:
+            s["hybrid"] = bool(hybrid)
+        if hybrid_alpha is not None:
+            try:
+                s["hybrid_alpha"] = max(0.0, min(1.0, float(hybrid_alpha)))
+            except (TypeError, ValueError):
+                pass
+        if pool_mult is not None:
+            try:
+                s["pool_mult"] = max(1, min(50, int(pool_mult)))
+            except (TypeError, ValueError):
+                pass
+        if min_score is not None:
+            try:
+                s["min_score"] = max(0.0, min(1.0, float(min_score)))
+            except (TypeError, ValueError):
+                pass
+        if rerank is not None and str(rerank) in ("none", "llm"):
+            s["rerank"] = str(rerank)
         s["embed_model"] = config.RAG_EMBED_MODEL
         s["chunk_chars"] = int(config.RAG_CHUNK_CHARS)
         self.save_settings(s)
@@ -502,46 +669,127 @@ class RagStore(object):
         return {"ok": True}
 
     # ---- поиск ----
-    def search(self, query, top_k=None, docs_dir=None):
-        """Ищет top-k ближайших чанков к запросу (косинусная близость).
+    def _score_rows(self, rows, queries, settings, pool):
+        """Считает гибридные скоры чанков по НАБОРУ запросов.
 
-        Возвращает список {file, page, chunk, text, score}. Пустой запрос
-        или пустой индекс → пустой список. Ошибки эмбеддингов пробрасываются
-        в виде исключения (обрабатывает вызывающий).
+        rows    — строки индекса (file, page, chunk, text, vec);
+        queries — список формулировок запроса (векторизуются отдельно);
+        pool    — сколько лучших вернуть ДО порога/реранка.
+
+        Для каждого чанка берёт ЛУЧШИЙ скор по всем формулировкам
+        (max), гибридизуя косинус с лексикой, если включён гибридный режим.
+        Возвращает список словарей hit, отсортированных по убыванию score.
         """
-        query = str(query or "").strip()
-        if not query:
+        hybrid = bool(settings.get("hybrid", config.RAG_HYBRID))
+        alpha = float(settings.get("hybrid_alpha", config.RAG_HYBRID_ALPHA))
+        # Термы запроса для лексики — объединяем все формулировки.
+        q_terms = []
+        for q in queries:
+            q_terms.extend(tokenize_ru(q))
+        # Векторизуем запросы (каждый отдельно).
+        q_vecs = []
+        for q in queries:
+            try:
+                q_vecs.append(embed_text(q))
+            except Exception:                    # noqa: BLE001
+                continue
+        if not q_vecs:
             return []
-        settings = self.load_settings()
-        k = int(top_k or settings.get("top_k") or config.RAG_TOP_K)
-        conn = self._conn()
-        rows = conn.execute(
-            "SELECT file, page, chunk, text, vec FROM chunks").fetchall()
-        if not rows:
-            return []
-        qv = embed_text(query)
         scored = []
         for file, page, chunk, text, vec in rows:
             v = _unpack_vector(vec, config.RAG_EMBED_DIM)
             if not v:
                 continue
-            scored.append((_cosine(qv, v), file, page, chunk, text))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        out = []
-        for score, file, page, chunk, text in scored[:max(1, k)]:
-            out.append({"file": file, "page": page, "chunk": chunk,
-                        "text": text, "score": round(score, 4)})
-        return out
+            cos = max((_cosine(qv, v) for qv in q_vecs), default=0.0)
+            if hybrid:
+                lex = lexical_score(q_terms, text)
+                score = hybrid_score(cos, lex, alpha)
+            else:
+                lex = 0.0
+                score = max(0.0, cos)
+            scored.append({"file": file, "page": page, "chunk": chunk,
+                           "text": text, "score": score, "cosine": cos,
+                           "lexical": lex})
+        scored.sort(key=lambda h: h["score"], reverse=True)
+        for h in scored:
+            h["score"] = round(h["score"], 4)
+            h["cosine"] = round(h["cosine"], 4)
+            h["lexical"] = round(h["lexical"], 4)
+        return scored[:max(1, pool)]
 
-    def build_context(self, query, top_k=None, docs_dir=None):
+    def search(self, query, top_k=None, docs_dir=None):
+        """Ищет top-k фрагментов к запросу с гибридным скором.
+
+        Выполняет ПЕРВЫЙ этап (векторный + лексический поиск, пул кандидатов),
+        затем ВТОРОЙ этап: фильтрация по порогу min_score и возврат top-k.
+        Возвращает список {file, page, chunk, text, score, cosine, lexical}.
+        Пустой запрос/индекс → []. Ошибки эмбеддингов пробрасываются.
+        """
+        return self.search_multi([query], top_k=top_k, docs_dir=docs_dir)
+
+    def search_multi(self, queries, top_k=None, docs_dir=None):
+        """Ищет по НАБОРУ формулировок (query rewrite + гибрид + порог).
+
+        queries — список строк (оригинал + переформулировки от LLM). Пустые — отбрасываются.
+        Скор чанка — лучший по всем формулировкам. Кандидаты ниже
+        min_score отбрасываются, остальные сортируются и режутся по top_k.
+        """
+        qs = [str(q).strip() for q in (queries or []) if str(q).strip()]
+        if not qs:
+            return []
+        settings = self.load_settings()
+        k = int(top_k or settings.get("top_k") or config.RAG_TOP_K)
+        pool_mult = int(settings.get("pool_mult", config.RAG_POOL_MULT))
+        min_score = float(settings.get("min_score", config.RAG_MIN_SCORE))
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT file, page, chunk, text, vec FROM chunks").fetchall()
+        if not rows:
+            return []
+        pool = max(1, k * max(1, pool_mult))
+        hits = self._score_rows(rows, qs, settings, pool)
+        if min_score > 0.0:
+            hits = [h for h in hits if h["score"] >= min_score]
+        return hits[:max(1, k)]
+
+    def rerank(self, query, hits, top_k=None, rerank_fn=None, model=None):
+        """ВТОРОЙ этап после поиска: пересортировка кандидатов.
+
+        rerank_fn — callback без LLM в самом модуле: (запрос, список hit)
+        → список пересортированных hit с вероятностями (см. агент.rag_rerank).
+        Если rerank_fn не задан или вернул пустое — возвращает hits как есть. При наличии
+        скора от реранкера он пишется в поле "rerank".
+        """
+        hits = list(hits or [])
+        if not hits or not callable(rerank_fn):
+            return hits[:max(1, int(top_k or len(hits)))]
+        try:
+            ranked = rerank_fn(str(query or ""), hits)
+        except Exception:                        # noqa: BLE001
+            return hits[:max(1, int(top_k or len(hits)))]
+        if not ranked:
+            return hits[:max(1, int(top_k or len(hits)))]
+        return list(ranked)[:max(1, int(top_k or len(ranked)))]
+
+    def build_context(self, query, top_k=None, docs_dir=None, queries=None,
+                      rerank_fn=None):
         """Формирует текстовый блок контекста RAG для подмешивания в промпт.
 
         Возвращает (context_text, hits): context_text — готовый блок с
         указанием источника (файл, страница) или "" если ничего не найдено;
         hits — список найденных фрагментов (для трассировки/UI).
         Ограничивается RAG_CTX_CAP символами.
+
+        queries   — набор формулировок (оригинал + query rewrite); если None — [query];
+        rerank_fn — callback СТОРОГО этапа (реранкер) силами агента:
+                    (query, hits) -> hits с полем "rerank"/пересортированные.
         """
-        hits = self.search(query, top_k=top_k, docs_dir=docs_dir)
+        if queries:
+            hits = self.search_multi(queries, top_k=top_k, docs_dir=docs_dir)
+        else:
+            hits = self.search(query, top_k=top_k, docs_dir=docs_dir)
+        if hits and callable(rerank_fn):
+            hits = self.rerank(query, hits, top_k=top_k, rerank_fn=rerank_fn)
         if not hits:
             return "", []
         parts = []
@@ -587,6 +835,13 @@ class RagStore(object):
             "top_k": settings.get("top_k"),
             "embed_model": config.RAG_EMBED_MODEL,
             "embed_dim": config.RAG_EMBED_DIM,
+            # Улучшенный поиск (показываем в UI).
+            "rewrite": bool(settings.get("rewrite")),
+            "hybrid": bool(settings.get("hybrid")),
+            "hybrid_alpha": settings.get("hybrid_alpha"),
+            "pool_mult": settings.get("pool_mult"),
+            "min_score": settings.get("min_score"),
+            "rerank": settings.get("rerank"),
             "files": int(files),
             "chunks": int(chunks),
             "updated": settings.get("updated"),
