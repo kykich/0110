@@ -858,7 +858,32 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         # релевантные фрагменты PDF-документов и подмешиваем их в промпт
         # (режим A2 — поиск всегда, модель получает готовый контекст).
         # Ошибки поиска (Ollama недоступна и т.п.) не ломают ответ модели.
-        rag_context, rag_hits = self.session.rag_context(question)
+        #
+        # УЛУЧШЕННЫЙ RAG (2-й этап, вариант B): здесь, в СЕРВЕРЕ, выполняем
+        # LLM-части (query rewrite + LLM-реранкер), т.к. RagStore намеренно не
+        # зависит от LLM. RagStore делает «чистую» часть: гибридный поиск,
+        # порог, пул кандидатов, а также вызывает переданные сюда callback-и.
+        rag_set = self.session.rag_settings()
+        rag_queries = None            # формулировки запроса (rewrite)
+        rag_rerank_fn = None          # callback LLM-реранкера
+        if rag_set.get("enabled"):
+            # Query rewrite: расширяем запрос синонимами/терминами через LLM.
+            if rag_set.get("rewrite") and self.agent is not None:
+                try:
+                    extra = self.agent.rewrite_query(question)
+                    if extra:
+                        rag_queries = [question] + list(extra)
+                        print("[RAG] query rewrite: +%d формулировок"
+                              % len(extra), flush=True)
+                except Exception as exc:             # noqa: BLE001
+                    print("[RAG] query rewrite не выполнен: %s" % exc,
+                          flush=True)
+            # LLM-реранкер: пересортировка кандидатов (если включён).
+            if (rag_set.get("rerank") == "llm" and self.agent is not None):
+                def rag_rerank_fn(query, hits, _agent=self.agent):
+                    return _agent.rag_rerank(query, hits)
+        rag_context, rag_hits = self.session.rag_context(
+            question, queries=rag_queries, rerank_fn=rag_rerank_fn)
         rag_sources = []
         if rag_context:
             print("[RAG] в запрос добавлено %d фрагментов (%d символов)"
@@ -1535,7 +1560,18 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                          if "enabled" in data else None),
                 docs_dir=(data.get("docs_dir")
                           if "docs_dir" in data else None),
-                top_k=(data.get("top_k") if "top_k" in data else None))
+                top_k=(data.get("top_k") if "top_k" in data else None),
+                rewrite=(data.get("rewrite")
+                         if "rewrite" in data else None),
+                hybrid=(data.get("hybrid")
+                        if "hybrid" in data else None),
+                hybrid_alpha=(data.get("hybrid_alpha")
+                              if "hybrid_alpha" in data else None),
+                pool_mult=(data.get("pool_mult")
+                           if "pool_mult" in data else None),
+                min_score=(data.get("min_score")
+                           if "min_score" in data else None),
+                rerank=(data.get("rerank") if "rerank" in data else None))
             return self._send_json(200, status)
 
         if action == "reindex":

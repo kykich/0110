@@ -724,10 +724,15 @@ class SessionStore:
         """Текущие настройки RAG (enabled/docs_dir/top_k/…)."""
         return self.rag.load_settings()
 
-    def set_rag_settings(self, enabled=None, docs_dir=None, top_k=None):
+    def set_rag_settings(self, enabled=None, docs_dir=None, top_k=None,
+                         rewrite=None, hybrid=None, hybrid_alpha=None,
+                         pool_mult=None, min_score=None, rerank=None):
         """Меняет настройки RAG. Возвращает обновлённый снимок статуса."""
         self.rag.update_settings(enabled=enabled, docs_dir=docs_dir,
-                                 top_k=top_k)
+                                 top_k=top_k, rewrite=rewrite,
+                                 hybrid=hybrid, hybrid_alpha=hybrid_alpha,
+                                 pool_mult=pool_mult, min_score=min_score,
+                                 rerank=rerank)
         return self.rag_status()
 
     def rag_reindex(self, docs_dir=None):
@@ -741,11 +746,16 @@ class SessionStore:
             self.rag.clear()
             return self.rag_status()
 
-    def rag_context(self, question):
+    def rag_context(self, question, queries=None, rerank_fn=None):
         """Контекст RAG для запроса: (текст, фрагменты) или ("", []).
 
         Выполняется ТОЛЬКО если RAG включён и в индексе есть чанки. Ошибки
         эмбеддингов/поиска не должны ломать ответ модели — возвращаем пусто.
+
+        queries   — набор поисковых формулировок (query rewrite, считается
+                    выше, в сервере, т.к. требует LLM); если None — только
+                    исходный question;
+        rerank_fn — callback LLM-реранкера (вариант B): (query, hits) -> hits.
         """
         try:
             settings = self.rag.load_settings()
@@ -753,9 +763,10 @@ class SessionStore:
                 return "", []
             if not self.rag.status().get("available"):
                 return "", []
-            return self.rag.build_context(question,
-                                          top_k=settings.get("top_k"),
-                                          docs_dir=settings.get("docs_dir"))
+            return self.rag.build_context(
+                question, top_k=settings.get("top_k"),
+                docs_dir=settings.get("docs_dir"),
+                queries=queries, rerank_fn=rerank_fn)
         except Exception as exc:                 # noqa: BLE001
             print("[RAG] поиск не выполнен: %s" % exc, flush=True)
             return "", []
