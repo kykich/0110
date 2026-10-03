@@ -16,6 +16,7 @@ import time
 import urllib.parse
 from datetime import datetime, timedelta
 
+from . import rag_llm
 from . import config, deepseek, gigachat, html_report
 
 __all__ = ["Agent"]
@@ -845,6 +846,16 @@ class Agent:
             "выдумывай факты, которых в документах нет. При использовании "
             "сведений из контекста можешь ссылаться на источник (файл/стр.).",
         ])
+
+    # ---- УЛУЧШЕННЫЙ RAG: query rewrite + LLM-реранкер ----
+    def rewrite_query(self, question, model=None, count=None):
+        """Расширяет поисковый запрос силами LLM (см. rag_llm)."""
+        return rag_llm.rewrite_query(self, question, model=model,
+                                     count=count)
+
+    def rag_rerank(self, query, hits, model=None):
+        """Пересортировка кандидатов RAG силами LLM (см. rag_llm)."""
+        return rag_llm.rag_rerank(self, query, hits, model=model)
 
     def check_invariants(self, question, answer_text, invariants, model=None):
         """ДЕТЕРМИНИРОВАННАЯ пост-проверка ответа на нарушение инвариантов.
