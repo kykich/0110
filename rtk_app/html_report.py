@@ -8,7 +8,8 @@ import re
 __all__ = ["escape_html", "apply_inline_markdown", "text_to_html_paragraphs",
            "render_memory_marks", "mark_memory_fragments",
            "count_memory_fragments", "render_with_memory_counts",
-           "render_math", "extract_and_render_math"]
+           "render_math", "extract_and_render_math",
+           "render_source_marks", "highlight_source_quotes"]
 
 # Маркеры, которыми помечаются фрагменты, взятые из памяти агента.
 #   [[R]]…[[/R]] — из РАБОЧЕЙ памяти   (подсветка фисташковым);
@@ -21,6 +22,12 @@ _MEM_OPEN_R = "[[R]]"
 _MEM_CLOSE_R = "[[/R]]"
 _MEM_OPEN_L = "[[L]]"
 _MEM_CLOSE_L = "[[/L]]"
+
+# Маркеры ЦИТАТ ИЗ RAG-ИСТОЧНИКА: [[S]]…[[/S]] — подсветка жёлтым. Ставит
+# сама модель (инструктируется в rag_system_prompt), а также распознаются
+# «кавычки-ёлочки» в ответе, если RAG-контекст был подан.
+_SRC_OPEN = "[[S]]"
+_SRC_CLOSE = "[[/S]]"
 
 
 def _memory_terms(memory):
@@ -134,6 +141,56 @@ def render_memory_marks(text):
                         "<span class='mem-src mem-src-longterm'>")
     text = text.replace(_MEM_CLOSE_L, "</span>")
     return text
+
+
+def render_source_marks(text):
+    """Превращает маркеры цитат источника [[S]]...[[/S]] в жёлтый <span>.
+
+    Вызывается ПОСЛЕ экранирования и inline-markdown (маркеры — обычный
+    текст, экранирование их не меняет). Жёлтая подсветка = цитата из
+    документа RAG-базы (см. rag_system_prompt).
+    """
+    if not text:
+        return text
+    text = text.replace(_SRC_OPEN, "<span class='src-quote'>")
+    text = text.replace(_SRC_CLOSE, "</span>")
+    return text
+
+
+def highlight_source_quotes(text):
+    """Подсвечивает «кавычки-ёлочки» (цитаты) как источник — жёлтым.
+
+    Запасной (детерминированный) путь, если модель процитировала документ
+    обычными кавычками «...», а не маркерами [[S]]. Работает на СЫРОМ
+    (экранированном) тексте ДО render_source_marks: участки между [[S]] и
+    [[/S]] пропускаются, чтобы не подсветить дважды.
+    """
+    if not text:
+        return text
+    out = []
+    i = 0
+    n = len(text)
+    in_marked = False
+    while i < n:
+        if text.startswith(_SRC_OPEN, i):
+            in_marked = True
+            out.append(_SRC_OPEN)
+            i += len(_SRC_OPEN)
+            continue
+        if text.startswith(_SRC_CLOSE, i):
+            in_marked = False
+            out.append(_SRC_CLOSE)
+            i += len(_SRC_CLOSE)
+            continue
+        ch = text[i]
+        if ch == "«" and not in_marked:
+            out.append("<span class='src-quote'>«")
+        elif ch == "»" and not in_marked:
+            out.append("»</span>")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def escape_html(text):
@@ -577,7 +634,7 @@ def text_to_html_paragraphs(text, memory=None):
     return html
 
 
-def render_with_memory_counts(text, memory=None):
+def render_with_memory_counts(text, memory=None, highlight_quotes=False):
     """Как text_to_html_paragraphs, но ещё возвращает СЧЁТЧИКИ использований.
 
     Возвращает кортеж (html, counts), где counts — {"working": N,
@@ -606,9 +663,16 @@ def render_with_memory_counts(text, memory=None):
     #    что остались сверх уже подсчитанных детерминированных меток.
     counts["working"] = max(counts["working"], text.count(_MEM_OPEN_R))
     counts["longterm"] = max(counts["longterm"], text.count(_MEM_OPEN_L))
+    # ЦИТАТЫ ИЗ ИСТОЧНИКА (RAG) — жёлтая подсветка. Если включено,
+    # сначала подсвечиваем «ёлочки» (запасной путь), затем маркеры [[S]]
+    # (основной путь, если модель их расставила по инструкции RAG).
+    if highlight_quotes:
+        text = highlight_source_quotes(text)
     # Подсветка фрагментов из памяти агента (после экранирования —
     # вставка своих <span> безопасна).
     text = render_memory_marks(text)
+    # Маркеры цитат источника [[S]] -> жёлтый <span>.
+    text = render_source_marks(text)
     lines = text.split("\n")
     html = []
     in_list = False

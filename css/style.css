@@ -368,6 +368,30 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
     box-shadow: inset 0 -2px 0 #c154c1;
 }
 
+/* Подсветка ЦИТАТ ИЗ ИСТОЧНИКА (RAG): жёлтый фон. Основной путь — маркеры
+   [[S]]...[[/S]] от модели, запасной — кавычки-ёлочки «...». */
+.msg.a .src-quote {
+    background: #fff3a3;
+    color: #5c4a00;
+    border-radius: 3px;
+    padding: 0 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+    box-shadow: inset 0 -2px 0 #e6c200;
+}
+
+/* Карточка детерминированного ответа «не знаю» (низкая релевантность RAG). */
+.msg.a .variant-rag-low .variant-name { color: #a15c00; }
+.msg.a .rag-low-note {
+    margin-top: 8px;
+    font-size: .74rem;
+    color: #9a6b1a;
+    background: #fff6e0;
+    border: 1px solid #f0d9a8;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
 /* ===== Панель выбора моделей (кнопки + температура) ===== */
 .model-bar {
     flex-shrink: 0;
@@ -1675,4 +1699,10 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
     color: #7d879c;
     font-size: .72rem;
     white-space: nowrap;
+}
+.msg.a .source-cites {
+    color: #b8860b;
+    font-size: .7rem;
+    font-family: ui-monospace, Consolas, monospace;
+    word-break: break-word;
 }
