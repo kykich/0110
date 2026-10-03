@@ -884,7 +884,22 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     return _agent.rag_rerank(query, hits)
         rag_context, rag_hits = self.session.rag_context(
             question, queries=rag_queries, rerank_fn=rag_rerank_fn)
+                # НИЗКАЯ РЕЛЕВАНТНОСТЬ: RAG включён И индекс доступен (есть чанки),
+        # но ни один фрагмент не прошёл порог (rag_hits пуст) — ассистент
+        # ОБЯЗАН сказать «не знаю» и попросить уточнение (детерминированно,
+        # без выдумывания фактов). Если индекс пуст — это не «низкая
+        # релевантность», а отсутствие базы: отвечает обычный режим.
+        rag_index_ok = False
+        try:
+            rag_index_ok = bool(self.session.rag.status().get("available"))
+        except Exception:                        # noqa: BLE001
+            rag_index_ok = False
+        rag_low_relevance = (bool(rag_set.get("enabled")) and rag_index_ok
+                             and not rag_hits)
         rag_sources = []
+        if rag_low_relevance:
+            print("[RAG] релевантность ниже порога -> ответ «не знаю»",
+                  flush=True)
         if rag_context:
             print("[RAG] в запрос добавлено %d фрагментов (%d символов)"
                   % (len(rag_hits), len(rag_context)), flush=True)
@@ -980,8 +995,9 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                                        answer_title=answer_title,
                                        task_state=task_state,
                                        invariants=invariants,
-                                       rag_context=(rag_context or None),
-                                       rag_sources=(rag_sources or None))
+                                                                              rag_context=(rag_context or None),
+                                       rag_sources=(rag_sources or None),
+                                       rag_low_relevance=rag_low_relevance)
         if result.get("ok"):
             # По одному ходу на ответ модели с уже готовой разметкой
             self.session.append_turn(question, {

@@ -71,6 +71,16 @@ SOURCES = (
 SYSTEM_PROMPT = ("Ты — дружелюбный ассистент. Отвечай по-русски, понятно и "
                  "структурированно, следуя запросам пользователя.")
 
+# ДЕТЕРМИНИРОВАННЫЙ ответ, когда RAG включён, но НИ ОДИН найденный фрагмент
+# не превысил порог релевантности. Ассистент ОБЯЗАН честно сказать «не знаю»
+# и попросить уточнение — это защита от выдумывания фактов (anti-hallucination).
+RAG_LOW_RELEVANCE_TEXT = (
+    "Я не знаю — в базе знаний нет достаточно релевантной информации по "
+    "вашему вопросу.\n\n"
+    "Пожалуйста, уточните вопрос: укажите документ, раздел/страницу или "
+    "используйте термины, как в исходных документах, — и я отвечу по "
+    "найденным фрагментам.")
+
 # Общая системная инструкция для вспомогательных LLM-операций, ожидающих
 # СТРОГО JSON-ответ (проверка инвариантов, переход задачи, факты и т.п.).
 STRICT_JSON_SYSTEM = ("Отвечай СТРОГО одним JSON-объектом: без пояснений, "
@@ -170,7 +180,7 @@ class Agent:
     def answer(self, question, history=None, selected=None, max_tokens=None,
                compact=None, memory=None, profile=None, answer_title=None,
                task_state=None, invariants=None, rag_context=None,
-               rag_sources=None):
+               rag_sources=None, rag_low_relevance=False):
         """Обрабатывает запрос пользователя и возвращает результат.
 
         Принимает:
@@ -237,6 +247,24 @@ class Agent:
             trace.append(step)
             print("[TRACE] Agent.answer() пустой вопрос -> ранний выход", flush=True)
             return Ok(self).value(ok=False, error="Пустой вопрос.", trace=trace)
+
+        # НИЗКАЯ РЕЛЕВАНТНОСТЬ RAG: ассистент ОБЯЗАН сказать «не знаю» и
+        # попросить уточнение — детерминированно, БЕЗ обращения к модели.
+        # «Модель ответов» одна, и она «не знает» предметную область,
+        # поэтому выдумывание фактов здесь недопустимо.
+        if rag_low_relevance:
+            ans_html = self.render_low_relevance_html()
+            trace.append({"kind": "act",
+                          "title": "RAG: релевантность ниже порога",
+                          "detail": "ответ «не знаю» + просьба уточнить"})
+            return Ok(self).value(
+                ok=True, html=ans_html, text="Ассистент: " + RAG_LOW_RELEVANCE_TEXT,
+                answers=[{"label": answer_title or self.label,
+                          "model": self.label,
+                          "text": RAG_LOW_RELEVANCE_TEXT,
+                          "temperature": None,
+                          "low_relevance": True}],
+                meta="", trace=trace)
 
         # Сжатие истории.
         # Основной путь: сервер уже прислал сжатую историю
@@ -377,7 +405,8 @@ class Agent:
                     continue
             block_html, mem_counts = self._render_block(
                 provider, model, label, cls, single, memory,
-                title=answer_title, rag_sources=src_list)
+                title=answer_title, rag_sources=src_list,
+                highlight_quotes=bool(rag_text))
             blocks.append(block_html)
             memory_used["working"] += mem_counts["working"]
             memory_used["longterm"] += mem_counts["longterm"]
@@ -836,16 +865,34 @@ class Agent:
         context = str(rag_context or "").strip()
         if not context:
             return ""
-        return "\n".join([
+        nl = chr(10)
+        return nl.join([
             "КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ (документы RAG):",
             context,
             "",
-            "ИНСТРУКЦИЯ ПО RAG: опирайся на приведённые выше фрагменты "
-            "документов при ответе. Если в них есть ответ — используй его. "
-            "Если ответа в контексте нет — прямо скажи об этом и не "
-            "выдумывай факты, которых в документах нет. При использовании "
-            "сведений из контекста можешь ссылаться на источник (файл/стр.).",
+            "ИНСТРУКЦИЯ ПО RAG:",
+            "1) опирайся ТОЛЬКО на приведённые выше фрагменты — не выдумывай факты, которых в документах нет;",
+            "2) если ответа в контексте нет — прямо скажи \"не знаю\" и попроси уточнить вопрос;",
+            "3) КАЖДЫЙ факт из документа подтверждай ссылкой на источник в КРУГЛЫХ СКОБКАХ, используя id фрагмента из заголовка (поле id=...), например: (otc682.pdf#стр.54/chunk.3);",
+            "4) дословную цитату из документа оборачивай в маркеры [[S]]...[[/S]] (они будут выделены жёлтым в интерфейсе).",
         ])
+
+    @staticmethod
+    def render_low_relevance_html(extra=None):
+        """HTML-карточка ответа «не знаю» при низкой релевантности RAG.
+
+        Гарантирует честный отказ вместо выдумывания фактов, когда ни один
+        найденный фрагмент не превысил порог. Возвращает готовый HTML-блок.
+        """
+        text = RAG_LOW_RELEVANCE_TEXT if not extra else str(extra)
+        body = html_report.text_to_html_paragraphs(text)
+        note = ("<div class='rag-low-note'>RAG: релевантных фрагментов "
+                "выше порога не найдено</div>")
+        return ("<div class='variant variant-rag-low'>"
+                "<div class='variant-head'>"
+                "<span class='variant-name'>Ассистент</span>"
+                "</div>"
+                "<div class='variant-body'>%s%s</div></div>" % (body, note))
 
     # ---- УЛУЧШЕННЫЙ RAG: query rewrite + LLM-реранкер ----
     def rewrite_query(self, question, model=None, count=None):
@@ -1215,7 +1262,7 @@ class Agent:
             }
 
     def _render_block(self, provider, model, label, cls, single, memory=None,
-                      title=None, rag_sources=None):
+                      title=None, rag_sources=None, highlight_quotes=False):
         """HTML-блок (карточка ответа одной модели) и счётчики памяти.
 
         В заголовке карточки показываем title (имя персоны, если ответ даёт
@@ -1235,7 +1282,7 @@ class Agent:
         counts = {"working": 0, "longterm": 0}
         try:
             frag, counts = html_report.render_with_memory_counts(
-                content, memory=memory)
+                content, memory=memory, highlight_quotes=highlight_quotes)
         except Exception:
             frag = html_report.escape_html(content)
 
@@ -1277,15 +1324,26 @@ class Agent:
             href = "/docs/%s" % urllib.parse.quote(file_name)
             page_note = (", стр. %s" % ", ".join(str(p) for p in pages)) \
                 if pages else ""
+            # Идентификаторы section/chunk_id фрагментов этого документа
+            # (показываем в скобках — те же id, что и в ответе модели).
+            cites = s.get("citations") or []
+            cite_ids = []
+            for c in cites:
+                c = str(c).strip()
+                if c:
+                    cite_ids.append(c)
+            cite_note = (" [" + "; ".join(cite_ids) + "]") if cite_ids else ""
             rows.append(
                 "<li class='source-item'>"
                 "<a class='source-link' href='%s' target='_blank' "
                 "rel='noopener'>%s</a>"
                 "<span class='source-pages'>%s</span>"
+                "<span class='source-cites'>%s</span>"
                 "</li>"
                 % (html_report.escape_html(href),
                    html_report.escape_html(doc),
-                   html_report.escape_html(page_note))
+                   html_report.escape_html(page_note),
+                   html_report.escape_html(cite_note))
             )
         return (
             "<div class='variant-sources'>"
