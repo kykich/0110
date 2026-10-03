@@ -2036,6 +2036,11 @@
     var ragEnabledEl = document.getElementById("rag-enabled");
     var ragDocsDirEl = document.getElementById("rag-docs-dir");
     var ragTopKEl = document.getElementById("rag-top-k");
+    var ragRewriteEl = document.getElementById("rag-rewrite");
+    var ragHybridEl = document.getElementById("rag-hybrid");
+    var ragMinScoreEl = document.getElementById("rag-min-score");
+    var ragPoolMultEl = document.getElementById("rag-pool-mult");
+    var ragRerankEl = document.getElementById("rag-rerank");
     var ragReindexBtn = document.getElementById("rag-reindex");
     var ragCheckBtn = document.getElementById("rag-check");
     var ragClearBtn = document.getElementById("rag-clear");
@@ -2043,6 +2048,8 @@
 
     // Локальный снимок состояния RAG.
     var ragState = { enabled: false, docs_dir: "", top_k: 5,
+                     rewrite: true, hybrid: true, hybrid_alpha: 0.6,
+                     pool_mult: 6, min_score: 0, rerank: "none",
                      files: 0, chunks: 0, available: false,
                      embed_model: "", updated: null };
 
@@ -2074,6 +2081,12 @@
         if (typeof d.enabled === "boolean") ragState.enabled = d.enabled;
         if (typeof d.docs_dir === "string") ragState.docs_dir = d.docs_dir;
         if (typeof d.top_k === "number") ragState.top_k = d.top_k;
+        if (typeof d.rewrite === "boolean") ragState.rewrite = d.rewrite;
+        if (typeof d.hybrid === "boolean") ragState.hybrid = d.hybrid;
+        if (typeof d.hybrid_alpha === "number") ragState.hybrid_alpha = d.hybrid_alpha;
+        if (typeof d.pool_mult === "number") ragState.pool_mult = d.pool_mult;
+        if (typeof d.min_score === "number") ragState.min_score = d.min_score;
+        if (typeof d.rerank === "string") ragState.rerank = d.rerank;
         if (typeof d.files === "number") ragState.files = d.files;
         if (typeof d.chunks === "number") ragState.chunks = d.chunks;
         if (typeof d.available === "boolean") ragState.available = d.available;
@@ -2086,6 +2099,16 @@
         if (ragTopKEl && document.activeElement !== ragTopKEl) {
             ragTopKEl.value = ragState.top_k || 5;
         }
+        if (ragRewriteEl) ragRewriteEl.checked = !!ragState.rewrite;
+        if (ragHybridEl) ragHybridEl.checked = !!ragState.hybrid;
+        if (ragMinScoreEl && document.activeElement !== ragMinScoreEl) {
+            ragMinScoreEl.value = (typeof ragState.min_score === "number")
+                ? ragState.min_score : 0;
+        }
+        if (ragPoolMultEl && document.activeElement !== ragPoolMultEl) {
+            ragPoolMultEl.value = ragState.pool_mult || 6;
+        }
+        if (ragRerankEl) ragRerankEl.value = ragState.rerank || "none";
         // Сообщение о проверке модели эмбеддингов (action: "check").
         if (d.embed_check) {
             if (d.embed_check.ok) {
@@ -2146,6 +2169,32 @@
     if (ragTopKEl) {
         ragTopKEl.addEventListener("change", function () {
             ragAction("set", { top_k: parseInt(ragTopKEl.value, 10) || 5 });
+        });
+    }
+    // Улучшенный поиск: query rewrite / гибрид / порог / пул / реранкер.
+    if (ragRewriteEl) {
+        ragRewriteEl.addEventListener("change", function () {
+            ragAction("set", { rewrite: ragRewriteEl.checked });
+        });
+    }
+    if (ragHybridEl) {
+        ragHybridEl.addEventListener("change", function () {
+            ragAction("set", { hybrid: ragHybridEl.checked });
+        });
+    }
+    if (ragMinScoreEl) {
+        ragMinScoreEl.addEventListener("change", function () {
+            ragAction("set", { min_score: parseFloat(ragMinScoreEl.value) || 0 });
+        });
+    }
+    if (ragPoolMultEl) {
+        ragPoolMultEl.addEventListener("change", function () {
+            ragAction("set", { pool_mult: parseInt(ragPoolMultEl.value, 10) || 6 });
+        });
+    }
+    if (ragRerankEl) {
+        ragRerankEl.addEventListener("change", function () {
+            ragAction("set", { rerank: ragRerankEl.value });
         });
     }
     if (ragReindexBtn) {
